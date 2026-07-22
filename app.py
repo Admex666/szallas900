@@ -37,12 +37,17 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 # Detect OS to select curl command
 CURL_CMD = "curl.exe" if platform.system() == "Windows" else "curl"
 
-def fetch_page_sync(url: str) -> str:
-    """Synchronously fetches the HTML content of a URL using curl with timeout and retries."""
+def fetch_page_sync(url: str, proxy: str = None) -> str:
+    """Synchronously fetches the HTML content of a URL using curl with timeout, retries, and optional proxy."""
+    cmd = [CURL_CMD, "-s", "--connect-timeout", "3", "-m", "2"]
+    if proxy:
+        cmd.extend(["-x", proxy])
+    cmd.extend([url, "-H", f"User-Agent: {USER_AGENT}"])
+    
     for attempt in range(3):
         try:
             res = subprocess.run(
-                [CURL_CMD, "-s", "--connect-timeout", "3", "-m", "2", url, "-H", f"User-Agent: {USER_AGENT}"],
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=3
@@ -53,10 +58,10 @@ def fetch_page_sync(url: str) -> str:
             pass
     return ""
 
-async def fetch_page(url: str, sem: asyncio.Semaphore) -> str:
+async def fetch_page(url: str, sem: asyncio.Semaphore, proxy: str = None) -> str:
     """Fetches the HTML content of a URL using subprocess in a thread pool."""
     async with sem:
-        return await asyncio.to_thread(fetch_page_sync, url)
+        return await asyncio.to_thread(fetch_page_sync, url, proxy)
 
 def parse_page(html_content: str):
     """Parses accommodation items and pagination from the HTML page."""
@@ -116,13 +121,23 @@ def parse_page(html_content: str):
     
     return items, total_pages
 
-async def scrape_date_range(town_id: str, adults: int, checkin: str, checkout: str, sem: asyncio.Semaphore, progress_callback):
+def check_cloudflare_block(html_content: str) -> bool:
+    """Checks if the HTML content is a Cloudflare block page."""
+    lowered = html_content.lower()
+    return "cloudflare" in lowered and ("access denied" in lowered or "attention required" in lowered or "ray id" in lowered)
+
+async def scrape_date_range(town_id: str, adults: int, checkin: str, checkout: str, sem: asyncio.Semaphore, proxy: str, progress_callback):
     """Scrapes only page 1 for a single checkin/checkout date range."""
     base_url = f"https://szallas.hu/{town_id}?adults={adults}&checkin={checkin}&checkout={checkout}&sort=CheapestPerPersonPerNightRate&sortdir=asc"
     
-    html1 = await fetch_page(base_url, sem)
+    html1 = await fetch_page(base_url, sem, proxy)
     if not html1:
-        progress_callback(0)
+        progress_callback(0, False)
+        return []
+        
+    is_blocked = check_cloudflare_block(html1)
+    if is_blocked:
+        progress_callback(0, True)
         return []
         
     items, _ = parse_page(html1)
@@ -130,10 +145,10 @@ async def scrape_date_range(town_id: str, adults: int, checkin: str, checkout: s
         item['checkin'] = checkin
         item['checkout'] = checkout
         
-    progress_callback(1)
+    progress_callback(1, False)
     return items
 
-async def run_scraper(town_id: str, adults: int, concurrency: int, progress_bar, status_text):
+async def run_scraper(town_id: str, adults: int, concurrency: int, proxy: str, progress_bar, status_text):
     """Runs the scraper for all 2-night stay combinations in August 2026."""
     sem = asyncio.Semaphore(concurrency)
     
@@ -145,16 +160,19 @@ async def run_scraper(town_id: str, adults: int, concurrency: int, progress_bar,
         
     completed_ranges = 0
     total_requests_made = 0
+    cf_blocked_detected = False
     
-    def on_range_complete(requests_in_range):
-        nonlocal completed_ranges, total_requests_made
+    def on_range_complete(requests_in_range, was_cf_blocked):
+        nonlocal completed_ranges, total_requests_made, cf_blocked_detected
         completed_ranges += 1
         total_requests_made += requests_in_range
+        if was_cf_blocked:
+            cf_blocked_detected = True
         progress_bar.progress(completed_ranges / len(date_ranges))
         status_text.text(f"Scraped {completed_ranges}/{len(date_ranges)} date ranges... (Requests made: {total_requests_made})")
 
     tasks = [
-        scrape_date_range(town_id, adults, checkin, checkout, sem, on_range_complete)
+        scrape_date_range(town_id, adults, checkin, checkout, sem, proxy, on_range_complete)
         for checkin, checkout in date_ranges
     ]
     
@@ -164,7 +182,7 @@ async def run_scraper(town_id: str, adults: int, concurrency: int, progress_bar,
     for r in results:
         all_items.extend(r)
         
-    return all_items, total_requests_made
+    return all_items, total_requests_made, cf_blocked_detected
 
 def main():
     st.title("🏨 Szallas.hu Scraper & Deal Finder")
@@ -175,6 +193,7 @@ def main():
     town_id = st.sidebar.text_input("Town ID (szallas.hu path)", value="sopron").strip().lower()
     adults = st.sidebar.number_input("Number of Adults", min_value=1, max_value=10, value=2)
     concurrency = st.sidebar.slider("Max Concurrent Requests", min_value=1, max_value=50, value=15)
+    proxy = st.sidebar.text_input("Proxy URL (Optional, e.g. http://host:port)", value="").strip()
     
     st.sidebar.markdown("""
     ---
@@ -202,8 +221,8 @@ def main():
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 
-            all_scraped_items, total_requests = loop.run_until_complete(
-                run_scraper(town_id, adults, concurrency, progress_bar, status_text)
+            all_scraped_items, total_requests, cf_blocked = loop.run_until_complete(
+                run_scraper(town_id, adults, concurrency, proxy, progress_bar, status_text)
             )
             
         scrape_duration = time.time() - start_time
@@ -213,7 +232,18 @@ def main():
         status_text.empty()
         
         if not all_scraped_items:
-            st.error("No accommodations found. Please verify the Town ID or try again.")
+            if cf_blocked:
+                st.error("🚫 **Cloudflare Bot Protection Detected**")
+                st.info("""
+                Szallas.hu blocked the requests because they originate from a cloud data center IP address (Streamlit Cloud).
+                
+                **How to fix:**
+                1. **Run locally**: Run the application on your own computer where it uses your home residential IP:
+                   `python -m streamlit run app.py`
+                2. **Use a proxy**: Enter a valid residential proxy URL in the sidebar proxy input field to route requests through trusted IPs.
+                """)
+            else:
+                st.error("No accommodations found. Please verify the Town ID or try again.")
             return
             
         # Start calculation timer

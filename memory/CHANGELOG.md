@@ -19,3 +19,4 @@
 - Updated the Streamlit metric cards layout in `app.py` to output the exact time taken by different processes (scraping, calculation/sorting, and total elapsed duration).
 - Optimized both `scrape.py` and `app.py` to only scrape page 1 of search results for each date range, reducing total HTTP requests to 29 (down from 87) and significantly accelerating execution speed.
 - Implemented a 2-second timeout and 3-attempt retry loop on all `curl` calls in both `scrape.py` and `app.py` to automatically abort and restart straggler requests, completely resolving the random end-of-run slowdown issue.
+- Added optional proxy configuration parameter in `app.py`'s UI sidebar and automatic Cloudflare bot protection/datacenter IP block detection, displaying diagnostic explanations and workaround guidance (proxy or local run) to the user when hosted in Streamlit Cloud.
