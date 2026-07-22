@@ -22,3 +22,6 @@
 - Added optional proxy configuration parameter in `app.py`'s UI sidebar and automatic Cloudflare bot protection/datacenter IP block detection, displaying diagnostic explanations and workaround guidance (proxy or local run) to the user when hosted in Streamlit Cloud.
 - Fixed a bug where proxy requests timed out due to the strict 2-second local timeout, dynamically adjusting max request time to 6 seconds when a proxy is configured.
 - Added detailed request diagnostics in `app.py` to capture curl stdout/stderr and print exact exit codes and error logs (e.g. proxy handshake timeouts or connection codes) in the Streamlit UI upon a zero-result run.
+- Integrated optional `ScraperAPI` key configuration parameter in `app.py`'s UI sidebar. This routes all scraper requests through ScraperAPI's proxy when configured, bypassing Cloudflare blocks for free on cloud hostings like Streamlit Cloud.
+- Added `.env` file support using `python-dotenv`, enabling automatic local and environment pre-filling of `PROXY_URL` and `SCRAPERAPI_KEY` configurations.
+- Created a `.gitignore` file to ensure the `.env` configuration file containing credentials is never accidentally committed to GitHub.

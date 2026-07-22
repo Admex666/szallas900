@@ -6,7 +6,12 @@ import argparse
 import html
 import platform
 import subprocess
+import os
 import pandas as pd
+from dotenv import load_dotenv
+
+# Load local .env file if present
+load_dotenv()
 
 # Set page configuration
 st.set_page_config(
@@ -37,15 +42,21 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 # Detect OS to select curl command
 CURL_CMD = "curl.exe" if platform.system() == "Windows" else "curl"
 
-def fetch_page_sync(url: str, proxy: str = None) -> dict:
+def fetch_page_sync(url: str, proxy: str = None, scraperapi_key: str = None) -> dict:
     """Synchronously fetches the HTML content of a URL using curl, returning a dict with html, code, and stderr."""
-    max_time = "6" if proxy else "2"
-    python_timeout = 8 if proxy else 3
-    
-    cmd = [CURL_CMD, "-s", "--connect-timeout", "5", "-m", max_time]
-    if proxy:
-        cmd.extend(["-x", proxy])
-    cmd.extend([url, "-H", f"User-Agent: {USER_AGENT}"])
+    if scraperapi_key:
+        import urllib.parse
+        encoded_url = urllib.parse.quote(url)
+        url = f"http://api.scraperapi.com?api_key={scraperapi_key}&url={encoded_url}"
+        cmd = [CURL_CMD, "-s", "--connect-timeout", "10", "-m", "15", url]
+        python_timeout = 18
+    else:
+        max_time = "6" if proxy else "2"
+        python_timeout = 8 if proxy else 3
+        cmd = [CURL_CMD, "-s", "--connect-timeout", "5", "-m", max_time]
+        if proxy:
+            cmd.extend(["-x", proxy])
+        cmd.extend([url, "-H", f"User-Agent: {USER_AGENT}"])
     
     last_err = ""
     last_code = 0
@@ -79,10 +90,10 @@ def fetch_page_sync(url: str, proxy: str = None) -> dict:
         "stderr": last_err
     }
 
-async def fetch_page(url: str, sem: asyncio.Semaphore, proxy: str = None) -> dict:
+async def fetch_page(url: str, sem: asyncio.Semaphore, proxy: str = None, scraperapi_key: str = None) -> dict:
     """Fetches the HTML content of a URL using subprocess in a thread pool, returning a dict."""
     async with sem:
-        return await asyncio.to_thread(fetch_page_sync, url, proxy)
+        return await asyncio.to_thread(fetch_page_sync, url, proxy, scraperapi_key)
 
 def parse_page(html_content: str):
     """Parses accommodation items and pagination from the HTML page."""
@@ -147,11 +158,11 @@ def check_cloudflare_block(html_content: str) -> bool:
     lowered = html_content.lower()
     return "cloudflare" in lowered and ("access denied" in lowered or "attention required" in lowered or "ray id" in lowered)
 
-async def scrape_date_range(town_id: str, adults: int, checkin: str, checkout: str, sem: asyncio.Semaphore, proxy: str, progress_callback):
+async def scrape_date_range(town_id: str, adults: int, checkin: str, checkout: str, sem: asyncio.Semaphore, proxy: str, scraperapi_key: str, progress_callback):
     """Scrapes only page 1 for a single checkin/checkout date range."""
     base_url = f"https://szallas.hu/{town_id}?adults={adults}&checkin={checkin}&checkout={checkout}&sort=CheapestPerPersonPerNightRate&sortdir=asc"
     
-    res_dict = await fetch_page(base_url, sem, proxy)
+    res_dict = await fetch_page(base_url, sem, proxy, scraperapi_key)
     html1 = res_dict["html"]
     
     if not html1:
@@ -172,7 +183,7 @@ async def scrape_date_range(town_id: str, adults: int, checkin: str, checkout: s
     progress_callback(1, False, "")
     return items
 
-async def run_scraper(town_id: str, adults: int, concurrency: int, proxy: str, progress_bar, status_text):
+async def run_scraper(town_id: str, adults: int, concurrency: int, proxy: str, scraperapi_key: str, progress_bar, status_text):
     """Runs the scraper for all 2-night stay combinations in August 2026."""
     sem = asyncio.Semaphore(concurrency)
     
@@ -199,7 +210,7 @@ async def run_scraper(town_id: str, adults: int, concurrency: int, proxy: str, p
         status_text.text(f"Scraped {completed_ranges}/{len(date_ranges)} date ranges... (Requests made: {total_requests_made})")
 
     tasks = [
-        scrape_date_range(town_id, adults, checkin, checkout, sem, proxy, on_range_complete)
+        scrape_date_range(town_id, adults, checkin, checkout, sem, proxy, scraperapi_key, on_range_complete)
         for checkin, checkout in date_ranges
     ]
     
@@ -221,7 +232,11 @@ def main():
     town_id = st.sidebar.text_input("Town ID (szallas.hu path)", value="sopron").strip().lower()
     adults = st.sidebar.number_input("Number of Adults", min_value=1, max_value=10, value=2)
     concurrency = st.sidebar.slider("Max Concurrent Requests", min_value=1, max_value=50, value=15)
-    proxy = st.sidebar.text_input("Proxy URL (Optional, e.g. http://host:port)", value="").strip()
+    default_proxy = os.environ.get("PROXY_URL", "").strip()
+    default_scraperapi_key = os.environ.get("SCRAPERAPI_KEY", "").strip()
+    
+    proxy = st.sidebar.text_input("Proxy URL (Optional, e.g. http://host:port)", value=default_proxy).strip()
+    scraperapi_key = st.sidebar.text_input("ScraperAPI Key (Optional, get at scraperapi.com)", value=default_scraperapi_key, type="password").strip()
     
     st.sidebar.markdown("""
     ---
@@ -250,7 +265,7 @@ def main():
                 asyncio.set_event_loop(loop)
                 
             all_scraped_items, total_requests, cf_blocked, errors = loop.run_until_complete(
-                run_scraper(town_id, adults, concurrency, proxy, progress_bar, status_text)
+                run_scraper(town_id, adults, concurrency, proxy, scraperapi_key, progress_bar, status_text)
             )
             
         scrape_duration = time.time() - start_time
