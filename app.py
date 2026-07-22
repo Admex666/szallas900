@@ -37,8 +37,8 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 # Detect OS to select curl command
 CURL_CMD = "curl.exe" if platform.system() == "Windows" else "curl"
 
-def fetch_page_sync(url: str, proxy: str = None) -> str:
-    """Synchronously fetches the HTML content of a URL using curl with timeout, retries, and optional proxy."""
+def fetch_page_sync(url: str, proxy: str = None) -> dict:
+    """Synchronously fetches the HTML content of a URL using curl, returning a dict with html, code, and stderr."""
     max_time = "6" if proxy else "2"
     python_timeout = 8 if proxy else 3
     
@@ -47,6 +47,8 @@ def fetch_page_sync(url: str, proxy: str = None) -> str:
         cmd.extend(["-x", proxy])
     cmd.extend([url, "-H", f"User-Agent: {USER_AGENT}"])
     
+    last_err = ""
+    last_code = 0
     for attempt in range(3):
         try:
             res = subprocess.run(
@@ -56,13 +58,29 @@ def fetch_page_sync(url: str, proxy: str = None) -> str:
                 timeout=python_timeout
             )
             if res.returncode == 0:
-                return res.stdout.decode('utf-8', errors='ignore')
-        except Exception:
-            pass
-    return ""
+                return {
+                    "html": res.stdout.decode('utf-8', errors='ignore'),
+                    "returncode": 0,
+                    "stderr": ""
+                }
+            else:
+                last_code = res.returncode
+                last_err = res.stderr.decode('utf-8', errors='ignore')
+        except subprocess.TimeoutExpired:
+            last_code = -99
+            last_err = "Python subprocess timeout expired"
+        except Exception as e:
+            last_code = -1
+            last_err = str(e)
+            
+    return {
+        "html": "",
+        "returncode": last_code,
+        "stderr": last_err
+    }
 
-async def fetch_page(url: str, sem: asyncio.Semaphore, proxy: str = None) -> str:
-    """Fetches the HTML content of a URL using subprocess in a thread pool."""
+async def fetch_page(url: str, sem: asyncio.Semaphore, proxy: str = None) -> dict:
+    """Fetches the HTML content of a URL using subprocess in a thread pool, returning a dict."""
     async with sem:
         return await asyncio.to_thread(fetch_page_sync, url, proxy)
 
@@ -133,14 +151,17 @@ async def scrape_date_range(town_id: str, adults: int, checkin: str, checkout: s
     """Scrapes only page 1 for a single checkin/checkout date range."""
     base_url = f"https://szallas.hu/{town_id}?adults={adults}&checkin={checkin}&checkout={checkout}&sort=CheapestPerPersonPerNightRate&sortdir=asc"
     
-    html1 = await fetch_page(base_url, sem, proxy)
+    res_dict = await fetch_page(base_url, sem, proxy)
+    html1 = res_dict["html"]
+    
     if not html1:
-        progress_callback(0, False)
+        err_msg = f"curl exit {res_dict['returncode']}: {res_dict['stderr']}".strip()
+        progress_callback(0, False, err_msg)
         return []
         
     is_blocked = check_cloudflare_block(html1)
     if is_blocked:
-        progress_callback(0, True)
+        progress_callback(0, True, "Cloudflare bot protection block page detected")
         return []
         
     items, _ = parse_page(html1)
@@ -148,7 +169,7 @@ async def scrape_date_range(town_id: str, adults: int, checkin: str, checkout: s
         item['checkin'] = checkin
         item['checkout'] = checkout
         
-    progress_callback(1, False)
+    progress_callback(1, False, "")
     return items
 
 async def run_scraper(town_id: str, adults: int, concurrency: int, proxy: str, progress_bar, status_text):
@@ -164,13 +185,16 @@ async def run_scraper(town_id: str, adults: int, concurrency: int, proxy: str, p
     completed_ranges = 0
     total_requests_made = 0
     cf_blocked_detected = False
+    errors_list = []
     
-    def on_range_complete(requests_in_range, was_cf_blocked):
+    def on_range_complete(requests_in_range, was_cf_blocked, error_message):
         nonlocal completed_ranges, total_requests_made, cf_blocked_detected
         completed_ranges += 1
         total_requests_made += requests_in_range
         if was_cf_blocked:
             cf_blocked_detected = True
+        if error_message:
+            errors_list.append(error_message)
         progress_bar.progress(completed_ranges / len(date_ranges))
         status_text.text(f"Scraped {completed_ranges}/{len(date_ranges)} date ranges... (Requests made: {total_requests_made})")
 
@@ -185,7 +209,8 @@ async def run_scraper(town_id: str, adults: int, concurrency: int, proxy: str, p
     for r in results:
         all_items.extend(r)
         
-    return all_items, total_requests_made, cf_blocked_detected
+    unique_errors = list(set(errors_list))[:5]
+    return all_items, total_requests_made, cf_blocked_detected, unique_errors
 
 def main():
     st.title("🏨 Szallas.hu Scraper & Deal Finder")
@@ -224,7 +249,7 @@ def main():
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 
-            all_scraped_items, total_requests, cf_blocked = loop.run_until_complete(
+            all_scraped_items, total_requests, cf_blocked, errors = loop.run_until_complete(
                 run_scraper(town_id, adults, concurrency, proxy, progress_bar, status_text)
             )
             
@@ -247,6 +272,10 @@ def main():
                 """)
             else:
                 st.error("No accommodations found. Please verify the Town ID or try again.")
+                if errors:
+                    st.warning("⚠️ **Detailed Debugging Info (Errors encountered during request):**")
+                    for err in errors:
+                        st.code(err)
             return
             
         # Start calculation timer
