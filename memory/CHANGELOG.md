@@ -25,3 +25,4 @@
 - Integrated optional `ScraperAPI` key configuration parameter in `app.py`'s UI sidebar. This routes all scraper requests through ScraperAPI's proxy when configured, bypassing Cloudflare blocks for free on cloud hostings like Streamlit Cloud.
 - Added `.env` file support using `python-dotenv`, enabling automatic local and environment pre-filling of `PROXY_URL` and `SCRAPERAPI_KEY` configurations.
 - Created a `.gitignore` file to ensure the `.env` configuration file containing credentials is never accidentally committed to GitHub.
+- Added a "Use ScraperAPI" checkbox in the UI sidebar. It auto-detects the host environment, defaulting to `True` on Streamlit Cloud (where API proxying is mandatory) and `False` locally (where direct, free, and sub-second scraping is preferred).

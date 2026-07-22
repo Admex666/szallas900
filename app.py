@@ -238,6 +238,15 @@ def main():
     proxy = st.sidebar.text_input("Proxy URL (Optional, e.g. http://host:port)", value=default_proxy).strip()
     scraperapi_key = st.sidebar.text_input("ScraperAPI Key (Optional, get at scraperapi.com)", value=default_scraperapi_key, type="password").strip()
     
+    # Detect if running in cloud (Streamlit Community Cloud sets STREAMLIT_SHARE_URL)
+    is_cloud = "STREAMLIT_SHARE_URL" in os.environ or os.path.exists("/home/appuser")
+    
+    use_scraperapi = st.sidebar.checkbox(
+        "Use ScraperAPI", 
+        value=is_cloud,
+        help="Bypasses Cloudflare bot detection. Recommended in the cloud. Disable locally to save credits."
+    )
+    
     st.sidebar.markdown("""
     ---
     ### How to deploy to Streamlit Cloud
@@ -264,8 +273,9 @@ def main():
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 
+            active_api_key = scraperapi_key if use_scraperapi else None
             all_scraped_items, total_requests, cf_blocked, errors = loop.run_until_complete(
-                run_scraper(town_id, adults, concurrency, proxy, scraperapi_key, progress_bar, status_text)
+                run_scraper(town_id, adults, concurrency, proxy, active_api_key, progress_bar, status_text)
             )
             
         scrape_duration = time.time() - start_time
