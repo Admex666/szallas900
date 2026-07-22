@@ -39,7 +39,10 @@ CURL_CMD = "curl.exe" if platform.system() == "Windows" else "curl"
 
 def fetch_page_sync(url: str, proxy: str = None) -> str:
     """Synchronously fetches the HTML content of a URL using curl with timeout, retries, and optional proxy."""
-    cmd = [CURL_CMD, "-s", "--connect-timeout", "3", "-m", "2"]
+    max_time = "6" if proxy else "2"
+    python_timeout = 8 if proxy else 3
+    
+    cmd = [CURL_CMD, "-s", "--connect-timeout", "5", "-m", max_time]
     if proxy:
         cmd.extend(["-x", proxy])
     cmd.extend([url, "-H", f"User-Agent: {USER_AGENT}"])
@@ -50,7 +53,7 @@ def fetch_page_sync(url: str, proxy: str = None) -> str:
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=3
+                timeout=python_timeout
             )
             if res.returncode == 0:
                 return res.stdout.decode('utf-8', errors='ignore')
